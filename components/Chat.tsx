@@ -53,7 +53,6 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
   // Long Press & Delete State
   const [longPressedChatId, setLongPressedChatId] = useState<string | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isLongPressRef = useRef(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -87,7 +86,6 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
   useEffect(() => {
     if (!activeChatId) return;
 
-    // Reset Unread Count for ME when entering chat
     const resetUnread = async () => {
         const chatRef = doc(db, 'chats', activeChatId);
         await updateDoc(chatRef, {
@@ -96,7 +94,6 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
     };
     resetUnread();
 
-    // 1. Listen for Messages
     const q = query(
       collection(db, 'chats', activeChatId, 'messages'),
       orderBy('createdAt', 'asc')
@@ -111,7 +108,6 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
         const msg = { id: docSnap.id, ...docSnap.data() } as PrivateMessage;
         msgs.push(msg);
 
-        // Mark as read if I am the receiver and it's not read
         if (!msg.read && msg.senderId !== currentUser.uid) {
            batch.update(docSnap.ref, { read: true });
            needsUpdate = true;
@@ -120,7 +116,6 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
 
       if (needsUpdate) {
           batch.commit().catch(console.error);
-          // Also reset unread count in metadata again just in case
           updateDoc(doc(db, 'chats', activeChatId), {
             [`unreadCounts.${currentUser.uid}`]: 0
           });
@@ -130,17 +125,14 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     });
 
-    // 2. Listen for Typing Status on the Chat Document
     const chatDocRef = doc(db, 'chats', activeChatId);
     const unsubscribeChat = onSnapshot(chatDocRef, (snapshot) => {
         if (snapshot.exists()) {
             const data = snapshot.data();
             const typingData = data.typing || {};
-            // Check if the OTHER person is typing
             const otherUid = activeChatUser?.uid;
             if (otherUid && typingData[otherUid]) {
                 setIsOtherUserTyping(true);
-                // Scroll to show the typing bubble
                 setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
             } else {
                 setIsOtherUserTyping(false);
@@ -247,13 +239,11 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
     const recipientId = activeChatUser.uid;
 
     try {
-      // Clear typing status immediately
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
       setIsTyping(false);
       
       const chatRef = doc(db, 'chats', activeChatId);
 
-      // Add Message
       await addDoc(collection(db, 'chats', activeChatId, 'messages'), {
         text: encryptedText,
         senderId: currentUser.uid,
@@ -262,7 +252,6 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
         type: 'text'
       });
 
-      // Update Chat Metadata (Typing false, Last Message, Increment Unread for Recipient)
       await updateDoc(chatRef, {
         [`typing.${currentUser.uid}`]: false,
         lastMessage: 'Encrypted Message',
@@ -301,13 +290,9 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
       setShowChatMenu(false);
       
       try {
-          // Optimistically clear local state for instant feedback
           setMessages([]);
-          
           const q = query(collection(db, 'chats', activeChatId, 'messages'));
           const snapshot = await getDocs(q);
-          
-          // Batch delete with chunking (Firestore limit 500 ops per batch)
           const chunks = [];
           let batch = writeBatch(db);
           let count = 0;
@@ -322,96 +307,56 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
               }
           });
           if (count > 0) chunks.push(batch);
-          
           await Promise.all(chunks.map(b => b.commit()));
-          
           await updateDoc(doc(db, 'chats', activeChatId), {
               lastMessage: 'Chat cleared',
               lastMessageTime: Date.now()
           });
       } catch(e) {
           console.error("Error clearing chat", e);
-          alert("Failed to clear chat. Please check your connection.");
       }
   };
 
   const handleBlockUser = async () => {
       if (!activeChatUser) return;
-      if (!window.confirm(`Block ${activeChatUser.displayName}? You won't receive messages from them.`)) return;
-      
+      if (!window.confirm(`Block ${activeChatUser.displayName}?`)) return;
       setShowChatMenu(false);
       try {
-          const myRef = doc(db, 'users', currentUser.uid);
-          await updateDoc(myRef, {
-              blockedUsers: arrayUnion(activeChatUser.uid)
-          });
-      } catch(e) {
-          console.error("Error blocking user", e);
-      }
+          await updateDoc(doc(db, 'users', currentUser.uid), { blockedUsers: arrayUnion(activeChatUser.uid) });
+      } catch(e) { console.error(e); }
   };
 
   const handleUnblockUser = async () => {
       if (!activeChatUser) return;
       if (!window.confirm(`Unblock ${activeChatUser.displayName}?`)) return;
-
       setShowChatMenu(false);
       try {
-          const myRef = doc(db, 'users', currentUser.uid);
-          await updateDoc(myRef, {
-              blockedUsers: arrayRemove(activeChatUser.uid)
-          });
-      } catch(e) {
-          console.error("Error unblocking user", e);
-      }
-  };
-
-  // --- LONG PRESS HANDLERS ---
-  const handleStartPress = (chatId: string) => {
-      isLongPressRef.current = false;
-      longPressTimerRef.current = setTimeout(() => {
-          isLongPressRef.current = true;
-          setLongPressedChatId(chatId);
-          // Vibrate if available
-          if (navigator.vibrate) navigator.vibrate(50);
-      }, 500); // 500ms threshold
-  };
-
-  const handleEndPress = () => {
-      if (longPressTimerRef.current) {
-          clearTimeout(longPressTimerRef.current);
-          longPressTimerRef.current = null;
-      }
+          await updateDoc(doc(db, 'users', currentUser.uid), { blockedUsers: arrayRemove(activeChatUser.uid) });
+      } catch(e) { console.error(e); }
   };
 
   const handleDeleteChat = async (chatId: string) => {
-      // Direct delete without native confirm, as the overlay serves as the confirmation
+      if (!window.confirm("Delete this chat conversation?")) return;
       try {
           await deleteDoc(doc(db, 'chats', chatId));
           setLongPressedChatId(null);
-      } catch (e) {
-          console.error("Error deleting chat", e);
-          alert("Failed to delete chat.");
-      }
+      } catch (e) { console.error(e); }
   };
 
   const getOtherUser = (chat: ChatMetadata) => {
     return chat.participantDetails.find(p => p.uid !== currentUser.uid) || chat.participantDetails[0];
   };
 
-  // --- RENDER ACTIVE CHAT ---
   if (activeChatId && activeChatUser) {
     return (
-      // Full Screen Overlay: z-[60] covers navigation (z-50)
       <div className="fixed inset-0 z-[60] flex flex-col bg-[#050505] text-white animate-fade-in">
-        {/* Background Ambient Effect */}
         <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
             <div className="absolute -top-[10%] -left-[10%] w-64 h-64 bg-violet-600/10 rounded-full blur-[80px]"></div>
             <div className="absolute top-[40%] -right-[10%] w-72 h-72 bg-fuchsia-600/10 rounded-full blur-[100px]"></div>
         </div>
 
-        {/* Floating Chat Header */}
         <div className="absolute top-4 left-4 right-4 z-30">
-            <div className="bg-[#121216]/80 backdrop-blur-xl border border-white/10 rounded-2xl px-4 py-3 flex items-center justify-between shadow-2xl shadow-black/50">
+            <div className="bg-[#121216]/80 backdrop-blur-xl border border-white/10 rounded-2xl px-4 py-3 flex items-center justify-between shadow-2xl">
                 <div className="flex items-center gap-3">
                     <button onClick={() => setActiveChatId(null)} className="p-2 -ml-2 text-gray-400 hover:text-white transition-colors rounded-full hover:bg-white/5">
                         <ChevronLeft size={24} />
@@ -420,14 +365,7 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
                         <img 
                             src={activeChatUser.photoURL || `https://ui-avatars.com/api/?name=${activeChatUser.displayName}`} 
                             className="w-full h-full rounded-full bg-gray-800 object-cover ring-2 ring-white/10"
-                            alt={activeChatUser.displayName || 'User'} 
                         />
-                        {/* Status Dot */}
-                        {!isBlocked && (
-                            <div className="absolute bottom-0 right-0 w-3 h-3 bg-[#050505] rounded-full flex items-center justify-center z-20">
-                                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                            </div>
-                        )}
                     </div>
                     <div>
                         <h3 className="font-bold text-sm text-white leading-tight">{activeChatUser.displayName}</h3>
@@ -446,14 +384,9 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
                     </div>
                 </div>
                 <div className="relative">
-                    <button 
-                        onClick={() => setShowChatMenu(!showChatMenu)}
-                        className="p-2 text-gray-500 hover:text-white rounded-full hover:bg-white/5 transition-colors"
-                    >
+                    <button onClick={() => setShowChatMenu(!showChatMenu)} className="p-2 text-gray-500 hover:text-white rounded-full hover:bg-white/5 transition-colors">
                         <MoreVertical size={20} />
                     </button>
-                    
-                    {/* Chat Menu Dropdown */}
                     {showChatMenu && (
                         <div className="absolute right-0 top-full mt-2 w-48 bg-[#1A1A23] border border-white/10 rounded-xl shadow-2xl z-50 overflow-hidden animate-fade-in">
                             <button onClick={handleClearChat} className="w-full flex items-center gap-3 px-4 py-3 text-left text-xs font-medium text-gray-300 hover:bg-white/5 hover:text-white transition-colors">
@@ -470,146 +403,62 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
                             )}
                         </div>
                     )}
-                    
-                    {/* Menu Backdrop */}
                     {showChatMenu && <div className="fixed inset-0 z-40" onClick={() => setShowChatMenu(false)} />}
                 </div>
             </div>
         </div>
 
-        {/* Messages Area */}
         <div className="flex-1 overflow-y-auto pt-24 px-4 pb-28 space-y-3 z-10 no-scrollbar">
-          <div className="flex justify-center mb-6">
-             <div className="bg-[#1A1A21] border border-white/5 px-4 py-2 rounded-full text-[10px] font-medium text-gray-500 flex items-center gap-2 shadow-lg">
-                <Lock size={12} className="text-emerald-500" /> End-to-end encrypted.
-             </div>
-          </div>
-
           {messages.map((msg) => {
             const isMe = msg.senderId === currentUser.uid;
-            
-            // --- INVITE CARD RENDER ---
             if (msg.type === 'invite') {
                 return (
                     <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
-                         <div className={`
-                            max-w-[75%] w-64 p-1.5 rounded-[1.5rem] relative shadow-2xl
-                            ${isMe ? 'bg-gradient-to-br from-violet-600 to-fuchsia-600' : 'bg-[#1A1A23] border border-white/10'}
-                         `}>
-                             <div className="bg-[#0A0A0E]/90 rounded-[1.2rem] p-4 backdrop-blur-md relative overflow-hidden">
-                                <div className="absolute top-0 right-0 w-20 h-20 bg-violet-500/20 blur-xl rounded-full -mr-10 -mt-10"></div>
-                                <div className="flex items-center gap-3 mb-3 relative z-10">
-                                    <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-violet-500 to-fuchsia-500 flex items-center justify-center shadow-lg">
+                         <div className={`max-w-[75%] w-64 p-1.5 rounded-[1.5rem] relative shadow-2xl ${isMe ? 'bg-gradient-to-br from-violet-600 to-fuchsia-600' : 'bg-[#1A1A23] border border-white/10'}`}>
+                             <div className="bg-[#0A0A0E]/90 rounded-[1.2rem] p-4 backdrop-blur-md">
+                                <div className="flex items-center gap-3 mb-3">
+                                    <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-violet-500 to-fuchsia-500 flex items-center justify-center">
                                         <Mic size={18} className="text-white" />
                                     </div>
                                     <div>
-                                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-0.5">Voice Room</span>
-                                        <h4 className="text-sm font-bold text-white leading-tight">{msg.text}</h4>
+                                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest block">Voice Room</span>
+                                        <h4 className="text-sm font-bold text-white">{msg.text}</h4>
                                     </div>
                                 </div>
-                                <button 
-                                    onClick={() => onJoinRoom(msg.roomId!)}
-                                    className="w-full py-2.5 bg-white text-black text-xs font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-gray-200 transition-colors shadow-lg active:scale-95"
-                                >
+                                <button onClick={() => onJoinRoom(msg.roomId!)} className="w-full py-2.5 bg-white text-black text-xs font-bold rounded-xl flex items-center justify-center gap-2">
                                     Join Now <ArrowRight size={14} />
                                 </button>
                              </div>
-                             <div className="flex items-center justify-end gap-1 px-2 mt-1">
-                                <p className={`text-[9px] text-white/60 font-medium`}>
-                                    {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                </p>
-                             </div>
-                             {isMe && (
-                                <button 
-                                    onClick={() => deleteMessage(msg.id)}
-                                    className="absolute -left-10 top-1/2 -translate-y-1/2 p-2 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity bg-[#1A1A23] rounded-full border border-white/5"
-                                >
-                                    <Trash2 size={14} />
-                                </button>
-                             )}
                          </div>
                     </div>
                 );
             }
-
-            // --- TEXT RENDER ---
             const decryptedText = simpleDecrypt(msg.text, ENCRYPTION_KEY);
-            
             return (
-              <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'} group mb-1`}>
-                <div 
-                  className={`max-w-[75%] px-5 py-3 text-sm relative transition-all shadow-lg ${
-                    isMe 
-                    ? 'bg-gradient-to-tr from-violet-600 to-fuchsia-600 text-white rounded-[1.2rem] rounded-br-none' 
-                    : 'bg-[#1A1A23] text-gray-100 border border-white/5 rounded-[1.2rem] rounded-bl-none'
-                  }`}
-                >
+              <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'} group`}>
+                <div className={`max-w-[75%] px-5 py-3 text-sm relative shadow-lg ${isMe ? 'bg-gradient-to-tr from-violet-600 to-fuchsia-600 text-white rounded-[1.2rem] rounded-br-none' : 'bg-[#1A1A23] text-gray-100 border border-white/5 rounded-[1.2rem] rounded-bl-none'}`}>
                   <p className="leading-relaxed break-words font-medium">{decryptedText}</p>
-                  
-                  <div className={`flex items-center justify-end gap-1 mt-1 opacity-70`}>
-                      <p className={`text-[9px] font-bold ${isMe ? 'text-violet-100' : 'text-gray-500'}`}>
-                        {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </p>
-                      {isMe && (
-                          msg.read ? <CheckCheck size={12} className="text-blue-200" /> : <Check size={12} className="text-white/70" />
-                      )}
+                  <div className="flex items-center justify-end gap-1 mt-1 opacity-70">
+                      <p className="text-[9px] font-bold">{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                      {isMe && (msg.read ? <CheckCheck size={12} className="text-blue-200" /> : <Check size={12} className="text-white/70" />)}
                   </div>
-
-                  {/* Delete Button (Hover) */}
-                  {isMe && (
-                      <button 
-                        onClick={() => deleteMessage(msg.id)}
-                        className="absolute -left-10 top-1/2 -translate-y-1/2 p-2 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity bg-[#1A1A23] rounded-full border border-white/5 hover:scale-110 active:scale-95"
-                      >
-                          <Trash2 size={14} />
-                      </button>
-                  )}
                 </div>
               </div>
             );
           })}
-
-          {isOtherUserTyping && !isBlocked && (
-             <div className="flex justify-start animate-fade-in pl-2">
-                 <div className="bg-[#1A1A23] border border-white/10 px-4 py-3 rounded-2xl rounded-bl-none flex gap-1.5 shadow-lg items-center">
-                    <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                 </div>
-             </div>
-          )}
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input Area */}
         <div className="absolute bottom-6 left-4 right-4 z-30">
           {isBlocked ? (
-              <div className="bg-[#1A1A23] border border-red-500/20 p-4 rounded-3xl flex justify-between items-center shadow-xl">
+              <div className="bg-[#1A1A23] border border-red-500/20 p-4 rounded-3xl flex justify-between items-center">
                   <span className="text-xs text-red-400 font-bold ml-2">You blocked this user.</span>
-                  <button 
-                    onClick={handleUnblockUser}
-                    className="bg-red-500/10 hover:bg-red-500/20 text-red-500 text-xs font-bold px-4 py-2 rounded-xl transition-colors"
-                  >
-                      Unblock
-                  </button>
+                  <button onClick={handleUnblockUser} className="bg-red-500/10 hover:bg-red-500/20 text-red-500 text-xs font-bold px-4 py-2 rounded-xl">Unblock</button>
               </div>
           ) : (
-              <form onSubmit={sendMessage} className="flex items-center gap-2 relative bg-[#121216]/90 backdrop-blur-xl border border-white/10 p-2 rounded-[1.5rem] shadow-2xl shadow-black/50">
-                <input 
-                  type="text" 
-                  value={newMessage}
-                  onChange={(e) => {
-                      setNewMessage(e.target.value);
-                      handleTyping();
-                  }}
-                  placeholder="Type message..."
-                  className="flex-1 bg-transparent text-white placeholder-gray-500 px-4 py-3 outline-none text-sm font-medium"
-                />
-                <button 
-                  type="submit" 
-                  disabled={!newMessage.trim()}
-                  className="p-3 bg-gradient-to-r from-violet-600 to-fuchsia-600 rounded-full text-white disabled:opacity-50 hover:scale-105 transition-transform shadow-lg shadow-violet-500/20 active:scale-95"
-                >
+              <form onSubmit={sendMessage} className="flex items-center gap-2 bg-[#121216]/90 backdrop-blur-xl border border-white/10 p-2 rounded-[1.5rem] shadow-2xl">
+                <input type="text" value={newMessage} onChange={(e) => { setNewMessage(e.target.value); handleTyping(); }} placeholder="Type message..." className="flex-1 bg-transparent text-white px-4 py-3 outline-none text-sm font-medium" />
+                <button type="submit" disabled={!newMessage.trim()} className="p-3 bg-gradient-to-r from-violet-600 to-fuchsia-600 rounded-full text-white disabled:opacity-50">
                   <Send size={18} fill="currentColor" />
                 </button>
               </form>
@@ -619,25 +468,96 @@ export const Chat: React.FC<ChatProps> = ({ currentUser, onJoinRoom }) => {
     );
   }
 
-  // --- RENDER CHAT LIST & SEARCH ---
   return (
     <div className="flex flex-col h-full bg-[#050505] text-white pb-24 px-6 relative overflow-hidden">
-      {/* Background Decor */}
       <div className="absolute top-0 right-0 w-64 h-64 bg-violet-600/10 rounded-full blur-[100px] pointer-events-none"></div>
 
-      {/* Header with Search Toggle */}
       <div className="py-8 relative z-10 flex items-center justify-between">
          <div>
              <h1 className="text-4xl font-extrabold bg-clip-text text-transparent bg-gradient-to-br from-white via-violet-200 to-fuchsia-200 tracking-tight">Messages</h1>
              <p className="text-gray-500 text-xs font-bold tracking-widest uppercase mt-2 opacity-60">Your Conversations</p>
          </div>
-         <button 
-            onClick={() => setIsSearchOpen(!isSearchOpen)}
-            className={`p-3 rounded-2xl transition-all shadow-xl ${isSearchOpen ? 'bg-violet-600 text-white' : 'bg-[#121216] border border-white/10 text-gray-400 hover:text-white'}`}
-         >
+         <button onClick={() => setIsSearchOpen(!isSearchOpen)} className={`p-3 rounded-2xl transition-all shadow-xl ${isSearchOpen ? 'bg-violet-600 text-white' : 'bg-[#121216] border border-white/10 text-gray-400 hover:text-white'}`}>
              {isSearchOpen ? <X size={20} /> : <Search size={20} />}
          </button>
       </div>
 
-      {/* Expandable Search Bar */}
-      {isSearchOpen
+      {isSearchOpen && (
+          <div className="mb-6 relative z-20 animate-fade-in">
+              <form onSubmit={handleSearch} className="bg-[#121216] border border-white/10 rounded-2xl p-2 flex gap-2">
+                  <input type="text" value={searchId} onChange={(e) => setSearchId(e.target.value.toUpperCase())} maxLength={4} placeholder="Enter 4-digit ID..." className="flex-1 bg-transparent px-4 py-2 outline-none text-white font-bold" />
+                  <button type="submit" className="px-6 py-2 bg-white text-black font-bold rounded-xl hover:bg-gray-200 transition-colors">Search</button>
+              </form>
+              {searchError && <p className="text-red-400 text-xs mt-2 ml-2 font-bold">{searchError}</p>}
+              {foundUser && (
+                  <div onClick={() => startChat(foundUser)} className="mt-3 p-4 bg-white/5 border border-white/10 rounded-2xl flex items-center justify-between hover:bg-white/10 cursor-pointer transition-all animate-fade-in">
+                      <div className="flex items-center gap-3">
+                          <img src={foundUser.photoURL || ''} className="w-12 h-12 rounded-full bg-gray-800 object-cover" />
+                          <div>
+                              <p className="font-bold text-white">{foundUser.displayName}</p>
+                              <p className="text-xs text-gray-500 font-mono">@{foundUser.uniqueId}</p>
+                          </div>
+                      </div>
+                      <ChevronRight size={20} className="text-gray-600" />
+                  </div>
+              )}
+          </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto space-y-3 no-scrollbar pb-10">
+        {loadingChats ? (
+            <div className="flex flex-col items-center justify-center py-20 gap-3">
+                <Loader2 className="animate-spin text-violet-500" size={32} />
+                <p className="text-gray-500 text-xs font-bold">Loading chats...</p>
+            </div>
+        ) : chats.length === 0 ? (
+            <div className="text-center py-20 opacity-60">
+                <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-6">
+                    <MessageSquare size={32} className="text-gray-600" />
+                </div>
+                <p className="text-gray-300 font-bold">No chats yet.</p>
+                <p className="text-gray-600 text-xs mt-1">Search an ID to start vibing.</p>
+            </div>
+        ) : (
+          chats.map(chat => {
+            const otherUser = getOtherUser(chat);
+            const myUnread = chat.unreadCounts?.[currentUser.uid] || 0;
+            return (
+              <div 
+                key={chat.id} 
+                onClick={() => { setActiveChatUser(otherUser as any); setActiveChatId(chat.id); }}
+                onContextMenu={(e) => { e.preventDefault(); setLongPressedChatId(chat.id); }}
+                className="group relative bg-[#121216]/60 backdrop-blur-xl border border-white/5 p-4 rounded-[2rem] flex items-center justify-between hover:border-violet-500/30 transition-all cursor-pointer active:scale-[0.98]"
+              >
+                <div className="flex items-center gap-4">
+                  <div className="relative w-14 h-14">
+                      <img src={otherUser?.photoURL || ''} className="w-full h-full rounded-full bg-gray-800 object-cover border-2 border-white/5" />
+                      {myUnread > 0 && <div className="absolute -top-1 -right-1 bg-violet-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-[#050505] animate-bounce">{myUnread}</div>}
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-white flex items-center gap-1.5">
+                        {otherUser?.displayName}
+                        {currentUser.blockedUsers?.includes(otherUser.uid) && <span className="text-[9px] text-red-500 font-bold uppercase">Blocked</span>}
+                    </h4>
+                    <p className="text-xs text-gray-500 line-clamp-1 w-40 mt-0.5">{chat.lastMessage}</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                    <p className="text-[10px] text-gray-600 font-bold">{new Date(chat.lastMessageTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                    <ChevronRight size={16} className="text-gray-700 ml-auto mt-1" />
+                </div>
+                
+                {longPressedChatId === chat.id && (
+                    <div className="absolute inset-0 z-50 bg-black/90 backdrop-blur-sm rounded-[2rem] flex items-center justify-center gap-4 animate-fade-in" onClick={(e) => e.stopPropagation()}>
+                        <button onClick={() => handleDeleteChat(chat.id)} className="p-4 bg-red-500 text-white rounded-2xl flex flex-col items-center gap-2 font-bold text-xs"><Trash2 size={24} /> Delete Chat</button>
+                        <button onClick={() => setLongPressedChatId(null)} className="p-4 bg-white/10 text-white rounded-2xl flex flex-col items-center gap-2 font-bold text-xs"><X size={24} /> Cancel</button>
+                    </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+};
