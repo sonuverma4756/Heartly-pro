@@ -1,0 +1,8 @@
+{
+  "name": "Heartly main",
+  "description": "A social voice platform allowing users to create rooms, chat, and connect instantly.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
